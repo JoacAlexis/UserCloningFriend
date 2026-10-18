@@ -23,3 +23,14 @@ $ curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
    $ uv run streamlit run streamlit_app.py
    ```
+
+### Primer design
+
+Add sequences in assembly order. The app designs primers at every adjacent
+sequence junction by searching for A-to-T overhangs 6–12 bases long and
+preferring the selected overhang length. Each junction displays the selected
+overhang, sequence ends, and forward/reverse primers in 5′→3′ orientation.
+
+Set the primer binding length and preferred overhang length in the sidebar.
+The overlap preference on the left-hand sequence controls whether a junction
+searches that sequence's end, the next sequence's start, or both.

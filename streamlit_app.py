@@ -1,9 +1,14 @@
 
-import random
 import streamlit as st
 import html
 
 st.set_page_config(page_title="USER Fusion", layout="wide")
+
+DNA_BASES = "ACGTRYMKBDHVN"
+DNA_COMPLEMENT = str.maketrans(
+    "ACGTRYMKBDHVN",
+    "TGCAYRKMVHDBN",
+)
 
 OVERLAP_OPTIONS = [
     "only this seq",
@@ -22,6 +27,121 @@ COLORS = [
 ]
 
 
+def normalize_sequence(sequence):
+    normalized = "".join(sequence.split()).upper()
+    invalid_bases = sorted(set(normalized) - set(DNA_BASES))
+    if invalid_bases:
+        raise ValueError(
+            "Sequence contains unsupported characters: "
+            + ", ".join(invalid_bases)
+        )
+    return normalized
+
+
+def reverse_complement(sequence):
+    return sequence.translate(DNA_COMPLEMENT)[::-1]
+
+
+def find_overhang(
+    seq1,
+    seq2,
+    preference,
+    preferred_length,
+    overlap_min=6,
+    overlap_max=12,
+):
+    seq1_window = seq1[-overlap_max * 2:]
+    seq2_window = seq2[:overlap_max * 2]
+
+    if preference == "only this seq":
+        potential_overhangs = seq1_window
+        switch_point = len(seq1_window)
+    elif preference == "only next primer":
+        potential_overhangs = seq2_window
+        switch_point = 0
+    else:
+        potential_overhangs = seq1_window + seq2_window
+        switch_point = len(seq1_window)
+
+    candidates = []
+    for start in range(len(potential_overhangs)):
+        if potential_overhangs[start] != "A":
+            continue
+        for length in range(overlap_min, overlap_max + 1):
+            end = start + length
+            if end > len(potential_overhangs):
+                break
+            if potential_overhangs[end - 1] != "T":
+                continue
+
+            distance_from_junction = min(
+                abs(start - switch_point),
+                abs(end - switch_point),
+            )
+            score = (
+                -abs(length - preferred_length)
+                - 0.5 * distance_from_junction
+            )
+            candidates.append(
+                (score, distance_from_junction, start, potential_overhangs[start:end])
+            )
+
+    if not candidates:
+        raise ValueError(
+            f"No A-to-T overhang between {overlap_min} and "
+            f"{overlap_max} bases was found for this junction."
+        )
+
+    score, _, _, overhang = max(
+        candidates,
+        key=lambda candidate: (
+            candidate[0],
+            -candidate[1],
+            -candidate[2],
+        ),
+    )
+    return overhang, score
+
+
+def MakePrimers(
+    seq1,
+    seq2,
+    overlap_min=6,
+    overlap_max=12,
+    overhang_preference="overlapping primer",
+    preferred_overhang_length=8,
+    binding_length=20,
+):
+    seq1 = normalize_sequence(seq1)
+    seq2 = normalize_sequence(seq2)
+    if len(seq1) < binding_length or len(seq2) < binding_length:
+        raise ValueError(
+            f"Both sequences must be at least {binding_length} bases long "
+            "to use the selected primer binding length."
+        )
+
+    overhang, score = find_overhang(
+        seq1,
+        seq2,
+        overhang_preference,
+        preferred_overhang_length,
+        overlap_min,
+        overlap_max,
+    )
+    seq1_binding = seq1[-binding_length:]
+    seq2_binding = seq2[:binding_length]
+
+    return {
+        "overhang": overhang,
+        "score": score,
+        "seq1_end": seq1[-(binding_length + overlap_max):],
+        "seq2_start": seq2[:binding_length + overlap_max],
+        "reverse_primer": reverse_complement(overhang)
+        + reverse_complement(seq1_binding),
+        "forward_primer": overhang + seq2_binding,
+    }
+
+
 # -------------------------
 # Session state
 # -------------------------
@@ -35,7 +155,7 @@ if "sequence_data" not in st.session_state:
     st.session_state.sequence_data = {
         1: {
             "gene_name": "Gene 1",
-            "sequence": "",
+            "sequence": "ATATATATATATATATAT",
             "color": COLORS[0],
             "overlap_preference": "only this seq",
         }
@@ -45,15 +165,12 @@ if "sequence_data" not in st.session_state:
 # -------------------------
 # Sequence operations
 # -------------------------
+if "color_index" not in st.session_state:
+    st.session_state.color_index = 1
 
 def add_sequence():
-    global color_index
-    if not color_index:
-        color_index=0
-    elif color_index > len(COLOR):
-        color_index = 0
-    else:
-        color_index += 1
+    idx = st.session_state.color_index
+    st.session_state.color_index = (idx+1) % len(COLORS) 
     seq_id = st.session_state.next_id
     st.session_state.next_id += 1
     st.session_state.sequence_ids.append(seq_id)
@@ -61,14 +178,16 @@ def add_sequence():
     st.session_state.sequence_data[seq_id] = {
         "gene_name": f"Gene {seq_id}",
         "sequence": "",
-        "color": COLORS[color_index],
+        "color": COLORS[idx],
         "overlap_preference": "only this seq",
     }
+    
     
 
 
 def remove_sequence(seq_id):
-    global color_index
+    idx = st.session_state.color_index
+    st.session_state.color_index = (idx+1) % len(COLORS) 
     if len(st.session_state.sequence_ids) <= 1:
         return
 
@@ -83,7 +202,7 @@ def remove_sequence(seq_id):
         f"overlap_{seq_id}",
     ]:
         st.session_state.pop(key, None)
-    color_index -= 1
+    
 
 
 def move_sequence(seq_id, direction):
@@ -103,8 +222,18 @@ def move_sequence(seq_id, direction):
 # -------------------------
 with st.sidebar:
     st.markdown("## Setup Parameters")
-    primer_length = st.number_input("primer sequence overlap",1,16,8)
-    primer_overhang = st.number_input("primer overhang",1,16,8)
+    primer_length = st.number_input(
+        "Primer binding length",
+        min_value=8,
+        max_value=40,
+        value=20,
+    )
+    primer_overhang = st.number_input(
+        "Preferred overhang length",
+        min_value=6,
+        max_value=12,
+        value=8,
+    )
 
 
     st.markdown("## Input sequences")
@@ -251,12 +380,50 @@ with st.sidebar:
 # -------------------------
 # Make primers
 # -------------------------
-def MakePrimers(seq1,seq2, overlap):
-    pass
+st.subheader("Junction primers")
 
+if len(ordered_sequences) < 2:
+    st.info("Add at least two sequences to design junction primers.")
 
-for i in range(len(ordered_sequences)-1):
-    pass
+for index in range(len(ordered_sequences) - 1):
+    left = ordered_sequences[index]
+    right = ordered_sequences[index + 1]
+    junction_name = f"{left['gene_name']} → {right['gene_name']}"
+
+    with st.expander(junction_name, expanded=True):
+        left_sequence = left["sequence"]
+        right_sequence = right["sequence"]
+        if not left_sequence.strip() or not right_sequence.strip():
+            st.info("Enter both sequences to design primers for this junction.")
+            continue
+
+        try:
+            primers = MakePrimers(
+                left_sequence,
+                right_sequence,
+                overhang_preference=left["overlap_preference"],
+                preferred_overhang_length=primer_overhang,
+                binding_length=primer_length,
+            )
+        except ValueError as error:
+            st.warning(str(error))
+            continue
+
+        st.caption(
+            f"Selected A-to-T overhang ({len(primers['overhang'])} bp): "
+            f"{primers['overhang']} · score {primers['score']:.1f}"
+        )
+        left_column, right_column = st.columns(2)
+        with left_column:
+            st.markdown(f"**{left['gene_name']} end**")
+            st.code(primers["seq1_end"], language=None)
+            st.markdown("**Reverse primer (5′→3′)**")
+            st.code(primers["reverse_primer"], language=None)
+        with right_column:
+            st.markdown(f"**{right['gene_name']} start**")
+            st.code(primers["seq2_start"], language=None)
+            st.markdown("**Forward primer (5′→3′)**")
+            st.code(primers["forward_primer"], language=None)
 
 
 # -------------------------
